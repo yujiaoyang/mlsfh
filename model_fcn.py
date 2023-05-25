@@ -1,71 +1,97 @@
 # import torchvision
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 
 
-class BasicConv(nn.Module):
-    def __init__(self, *channels, p=0.4, transposed=False):
-        super(BasicConv, self).__init__()
-        layers = []
-        for c_in, c_out in zip(channels[:-1], channels[1:]):
-            layers.extend(
-                [
-                    nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=3, stride=2, bias=False) \
-                        if not transposed else \
-                        nn.ConvTranspose2d(in_channels=c_in, out_channels=c_out, kernel_size=3, stride=2, bias=False),
-                    nn.BatchNorm2d(num_features=c_out),
-                    nn.ELU(inplace=True),
-                    nn.Dropout(p=p)
-                ]
-            )
-        self.conv = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.conv(x)
-
-
 class FCN(nn.Module):
-    def __init__(self):
+
+    def __init__(self, in_channels=3, out_channels=1, features=32):
         super(FCN, self).__init__()
 
-        self.encoder = nn.Sequential(
-            BasicConv(1, 32),
-            BasicConv(32, 64),
-            BasicConv(64, 128),
-            BasicConv(128, 256),
-            BasicConv(256, 512),
+        self.encoder1 = FCN._block(in_channels, features, name="enc1")
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.encoder2 = FCN._block(features, features * 2, name="enc2")
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.encoder3 = FCN._block(features * 2, features * 4, name="enc3")
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.encoder4 = FCN._block(features * 4, features * 8, name="enc4")
+        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.bottleneck = FCN._block(features * 8, features * 16, name="bottleneck")
+
+        self.upconv4 = nn.ConvTranspose2d(features * 16, features * 16, kernel_size=2, stride=2)
+        self.decoder4 = FCN._block(features * 16, features * 8, name="dec4")
+        self.upconv3 = nn.ConvTranspose2d(features * 8, features * 8, kernel_size=2, stride=2)
+        self.decoder3 = FCN._block(features * 8, features * 4, name="dec3")
+        self.upconv2 = nn.ConvTranspose2d(features * 4, features * 4, kernel_size=2, stride=2)
+        self.decoder2 = FCN._block(features * 4, features * 2, name="dec2")
+        self.upconv1 = nn.ConvTranspose2d(features * 2, features * 2, kernel_size=2, stride=2)
+        self.decoder1 = FCN._block(features * 2, features, name="dec1")
+
+        self.conv = nn.Conv2d(in_channels=features, out_channels=out_channels, kernel_size=1)
+
+    def forward(self, x):
+        enc1 = self.encoder1(x)
+        enc2 = self.encoder2(self.pool1(enc1))
+        enc3 = self.encoder3(self.pool2(enc2))
+        enc4 = self.encoder4(self.pool3(enc3))
+
+        bottleneck = self.bottleneck(self.pool4(enc4))
+
+        dec4 = self.upconv4(bottleneck)
+        # dec4 = torch.cat((dec4, enc4), dim=1)
+        dec4 = self.decoder4(dec4)
+        dec3 = self.upconv3(dec4)
+        # dec3 = torch.cat((dec3, enc3), dim=1)
+        dec3 = self.decoder3(dec3)
+        dec2 = self.upconv2(dec3)
+        # dec2 = torch.cat((dec2, enc2), dim=1)
+        dec2 = self.decoder2(dec2)
+        dec1 = self.upconv1(dec2)
+        # dec1 = torch.cat((dec1, enc1), dim=1)
+        dec1 = self.decoder1(dec1)
+        # return torch.sigmoid(self.conv(dec1))
+        return bottleneck, self.conv(dec1)
+
+    @staticmethod
+    def _block(in_channels, features, name):
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    (
+                        name + "conv1",
+                        nn.Conv2d(
+                            in_channels=in_channels,
+                            out_channels=features,
+                            kernel_size=3,
+                            padding=1,
+                            bias=False,
+                        ),
+                    ),
+                    (name + "norm1", nn.BatchNorm2d(num_features=features)),
+                    (name + "relu1", nn.ReLU(inplace=True)),
+                    (
+                        name + "conv2",
+                        nn.Conv2d(
+                            in_channels=features,
+                            out_channels=features,
+                            kernel_size=3,
+                            padding=1,
+                            bias=False,
+                        ),
+                    ),
+                    (name + "norm2", nn.BatchNorm2d(num_features=features)),
+                    (name + "relu2", nn.ReLU(inplace=True)),
+                ]
+            )
         )
 
-        self.decoder = nn.Sequential(
-            BasicConv(512, 256, transposed=True),
-            BasicConv(256, 128, transposed=True),
-            BasicConv(128, 64, transposed=True),
-            BasicConv(64, 32, transposed=True),
-            BasicConv(32, 1, transposed=True)
-        )
 
-        # self.fc = nn.Sequential(
-        #     nn.Conv2d(512, 512, kernel_size=1),
-        #     nn.BatchNorm2d(num_features=256),
-        #     nn.Tanh()
-        # )
-        # self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
-        # self.unpool = nn.AvgPool2d(kernel_size=2, stride=2)
+cmd = torch.rand(size=(10, 1, 80, 80))
+sfh = FCN(in_channels=1, out_channels=1, features=32)
 
-    def encode(self, cmd):
-        return self.encoder(cmd)
-
-    def decode(self, cmd_enc):
-        return self.decoder(cmd_enc)
-
-    def forward(self, cmd):
-        enc = self.encoder(cmd)
-        dec = self.decoder(enc)
-        return enc, dec
-
-
-cmd = torch.rand(size=(10, 1, 511, 511))
-sfh = FCN()
 print(cmd.shape)
 enc, rec = sfh(cmd)
 print(enc.shape, rec.shape)
@@ -77,7 +103,15 @@ Hin = (Hout-1)*2+3
      = 1
 Hin = 3
 """
-x = 1
-for i in range(10):
-    print(x)
-    x = (x - 1) * 2 + 3
+# x = 1
+# for i in range(10):
+#     print(x)
+#     x = (x - 1) * 2 + 3
+# conv = torch.nn.Conv1d(1, 2, kernel_size=3, padding=1)
+# pool = torch.nn.MaxPool1d(kernel_size=2, stride=2)
+# x = torch.rand(size=(10, 1, 100))
+# print(x.shape, pool(conv(x)).shape)
+#
+# conv = torch.nn.ConvTranspose1d(1, 2, kernel_size=3, stride=2, padding=1)
+# # pool = torch.nn.MaxPool1d(kernel_size=2, stride=2)
+# print(x.shape, conv(x).shape)
